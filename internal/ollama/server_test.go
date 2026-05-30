@@ -174,6 +174,94 @@ func TestToOllamaChatResponseSeparatesThinkingTags(t *testing.T) {
 	}
 }
 
+func TestTranslateChatImagesToOpenAIContentParts(t *testing.T) {
+	req := map[string]any{
+		"messages": []any{
+			map[string]any{
+				"role":    "user",
+				"content": "what is this?",
+				"images":  []any{"aGVsbG8="},
+			},
+		},
+	}
+	model := &config.Model{Name: "vision", ModelType: "vlm"}
+
+	path, err := translateImages(req, model, "/v1/chat/completions", "chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "/v1/chat/completions" {
+		t.Fatalf("path = %s", path)
+	}
+	message := req["messages"].([]any)[0].(map[string]any)
+	if _, exists := message["images"]; exists {
+		t.Fatal("images should be removed after translation")
+	}
+	parts := message["content"].([]any)
+	if len(parts) != 2 {
+		t.Fatalf("parts len = %d", len(parts))
+	}
+	if parts[0].(map[string]any)["type"] != "text" {
+		t.Fatalf("first part = %#v", parts[0])
+	}
+	imagePart := parts[1].(map[string]any)
+	if imagePart["type"] != "image_url" {
+		t.Fatalf("image part = %#v", imagePart)
+	}
+	imageURL := imagePart["image_url"].(map[string]any)["url"]
+	if imageURL != "data:image/png;base64,aGVsbG8=" {
+		t.Fatalf("image url = %#v", imageURL)
+	}
+}
+
+func TestTranslateImagesRejectsNonVisionModel(t *testing.T) {
+	req := map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": "what is this?", "images": []any{"aGVsbG8="}},
+		},
+	}
+	model := &config.Model{Name: "text", ModelType: "llm"}
+
+	_, err := translateImages(req, model, "/v1/chat/completions", "chat")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "not configured as a vision model") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestTranslateGenerateImagesRoutesToChatCompletions(t *testing.T) {
+	req := map[string]any{
+		"system": "be concise",
+		"prompt": "describe",
+		"images": []any{"data:image/jpeg;base64,abc"},
+	}
+	model := &config.Model{Name: "vision", ModelType: "vlm"}
+
+	path, err := translateImages(req, model, "/v1/completions", "generate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "/v1/chat/completions" {
+		t.Fatalf("path = %s", path)
+	}
+	if _, exists := req["images"]; exists {
+		t.Fatal("images should be removed from generate request")
+	}
+	messages := req["messages"].([]any)
+	if len(messages) != 2 {
+		t.Fatalf("messages len = %d", len(messages))
+	}
+	user := messages[1].(map[string]any)
+	parts := user["content"].([]any)
+	imagePart := parts[1].(map[string]any)
+	imageURL := imagePart["image_url"].(map[string]any)["url"]
+	if imageURL != "data:image/jpeg;base64,abc" {
+		t.Fatalf("image url = %#v", imageURL)
+	}
+}
+
 func TestToOllamaChatResponseInfersMissingThinkStart(t *testing.T) {
 	out := map[string]any{
 		"choices": []any{
@@ -234,6 +322,28 @@ func TestToOllamaGenerateResponseUsesStructuredThinking(t *testing.T) {
 		t.Fatalf("thinking = %#v", resp["thinking"])
 	}
 	if resp["response"] != "Answer" {
+		t.Fatalf("response = %#v", resp["response"])
+	}
+}
+
+func TestToOllamaGenerateResponseAcceptsChatCompletionShape(t *testing.T) {
+	out := map[string]any{
+		"choices": []any{
+			map[string]any{
+				"message": map[string]any{
+					"content":           "The image shows a receipt.",
+					"reasoning_content": "Inspecting the document.",
+				},
+			},
+		},
+	}
+
+	resp := toOllamaResponse(out, "qwen3.5:4b", "generate")
+
+	if resp["thinking"] != "Inspecting the document." {
+		t.Fatalf("thinking = %#v", resp["thinking"])
+	}
+	if resp["response"] != "The image shows a receipt." {
 		t.Fatalf("response = %#v", resp["response"])
 	}
 }

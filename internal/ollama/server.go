@@ -330,6 +330,12 @@ func (s *Server) infer(w http.ResponseWriter, r *http.Request, req map[string]an
 	req["model"] = model.Name
 	translateOptions(req)
 	translateThinking(req, mode)
+	var err error
+	path, err = translateImages(req, model, path, mode)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	stream, _ := req["stream"].(bool)
 	if stream {
 		s.streamInference(w, r, req, path, model.Name, mode)
@@ -465,6 +471,120 @@ func translateThinking(req map[string]any, mode string) {
 	delete(req, "think")
 }
 
+func translateImages(req map[string]any, model *config.Model, path, mode string) (string, error) {
+	switch mode {
+	case "chat":
+		hasImages, err := translateChatImages(req)
+		if err != nil {
+			return path, err
+		}
+		if hasImages && !isVisionModel(model) {
+			return path, fmt.Errorf("model %q is not configured as a vision model in models.yaml", model.Name)
+		}
+	case "generate":
+		images := stringList(req["images"])
+		if len(images) == 0 {
+			return path, nil
+		}
+		if !isVisionModel(model) {
+			return path, fmt.Errorf("model %q is not configured as a vision model in models.yaml", model.Name)
+		}
+		req["messages"] = ollamaGenerateMessages(req, images)
+		delete(req, "prompt")
+		delete(req, "system")
+		delete(req, "suffix")
+		delete(req, "images")
+		delete(req, "raw")
+		return "/v1/chat/completions", nil
+	}
+	return path, nil
+}
+
+func translateChatImages(req map[string]any) (bool, error) {
+	messages, ok := req["messages"].([]any)
+	if !ok {
+		return false, nil
+	}
+	hasImages := false
+	for _, item := range messages {
+		message, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		images := stringList(message["images"])
+		if len(images) == 0 {
+			continue
+		}
+		hasImages = true
+		message["content"] = openAIContentParts(message["content"], images)
+		delete(message, "images")
+	}
+	return hasImages, nil
+}
+
+func ollamaGenerateMessages(req map[string]any, images []string) []any {
+	messages := make([]any, 0, 2)
+	if system, _ := req["system"].(string); system != "" {
+		messages = append(messages, map[string]any{"role": "system", "content": system})
+	}
+	prompt, _ := req["prompt"].(string)
+	messages = append(messages, map[string]any{
+		"role":    "user",
+		"content": openAIContentParts(prompt, images),
+	})
+	return messages
+}
+
+func openAIContentParts(content any, images []string) []any {
+	parts := make([]any, 0, 1+len(images))
+	switch value := content.(type) {
+	case string:
+		if value != "" {
+			parts = append(parts, map[string]any{"type": "text", "text": value})
+		}
+	case []any:
+		parts = append(parts, value...)
+	case nil:
+	default:
+		parts = append(parts, map[string]any{"type": "text", "text": fmt.Sprint(value)})
+	}
+	for _, image := range images {
+		parts = append(parts, map[string]any{
+			"type":      "image_url",
+			"image_url": map[string]any{"url": imageDataURL(image)},
+		})
+	}
+	return parts
+}
+
+func imageDataURL(image string) string {
+	if strings.HasPrefix(image, "data:image/") {
+		return image
+	}
+	return "data:image/png;base64," + image
+}
+
+func stringList(value any) []string {
+	switch items := value.(type) {
+	case []any:
+		out := make([]string, 0, len(items))
+		for _, item := range items {
+			if text, ok := item.(string); ok && text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	case []string:
+		return items
+	default:
+		return nil
+	}
+}
+
+func isVisionModel(model *config.Model) bool {
+	return strings.EqualFold(model.ModelType, "vlm")
+}
+
 func toOllamaResponse(out map[string]any, modelName, mode string) map[string]any {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	normalizer := newReasoningNormalizer(modelName)
@@ -497,9 +617,22 @@ func toOllamaResponse(out map[string]any, modelName, mode string) map[string]any
 	if choices, ok := out["choices"].([]any); ok && len(choices) > 0 {
 		if choice, ok := choices[0].(map[string]any); ok {
 			text, _ = choice["text"].(string)
+			if text == "" {
+				if msg, ok := choice["message"].(map[string]any); ok {
+					text, _ = msg["content"].(string)
+				}
+			}
 			thinking, _ = choice["reasoning_content"].(string)
 			if thinking == "" {
 				thinking, _ = choice["thinking"].(string)
+			}
+			if thinking == "" {
+				if msg, ok := choice["message"].(map[string]any); ok {
+					thinking, _ = msg["reasoning_content"].(string)
+					if thinking == "" {
+						thinking, _ = msg["thinking"].(string)
+					}
+				}
 			}
 		}
 	}
@@ -551,9 +684,22 @@ func streamChunkToOllama(chunk map[string]any, modelName, mode string, normalize
 		return map[string]any{"model": modelName, "created_at": now, "message": msg, "done": done}
 	}
 	text, _ := choice["text"].(string)
+	if text == "" {
+		if delta, ok := choice["delta"].(map[string]any); ok {
+			text, _ = delta["content"].(string)
+		}
+	}
 	thinking, _ := choice["reasoning_content"].(string)
 	if thinking == "" {
 		thinking, _ = choice["thinking"].(string)
+	}
+	if thinking == "" {
+		if delta, ok := choice["delta"].(map[string]any); ok {
+			thinking, _ = delta["reasoning_content"].(string)
+			if thinking == "" {
+				thinking, _ = delta["thinking"].(string)
+			}
+		}
 	}
 	done := choice["finish_reason"] != nil
 	parts := normalizer.Process(text)
