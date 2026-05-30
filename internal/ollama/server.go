@@ -203,14 +203,16 @@ func (s *Server) show(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"modelfile":  "FROM " + model.HFRepo,
-		"parameters": "",
-		"template":   "",
-		"details":    model.Details,
+		"modelfile":    "FROM " + model.HFRepo,
+		"parameters":   "",
+		"template":     "",
+		"details":      modelDetails(*model),
+		"capabilities": ollamaCapabilities(*model),
 		"model_info": map[string]any{
 			"openarc.engine":       model.Engine,
 			"openarc.model_type":   model.ModelType,
 			"openarc.device":       model.Device,
+			"openarc.vision":       isVisionModel(model),
 			"huggingface.repo":     model.HFRepo,
 			"huggingface.revision": model.HFRevision,
 		},
@@ -410,18 +412,40 @@ func (s *Server) resolve(w http.ResponseWriter, name string) (*config.Model, boo
 }
 
 func tagModel(model config.Model) map[string]any {
-	details := model.Details
-	if details == nil {
-		details = map[string]any{}
-	}
-	return map[string]any{
+	item := map[string]any{
 		"name":        model.Name,
 		"model":       model.Name,
 		"modified_at": model.ModifiedAt,
 		"size":        model.Size,
 		"digest":      model.Digest,
-		"details":     details,
+		"details":     modelDetails(model),
 	}
+	if isVisionModel(&model) {
+		item["capabilities"] = ollamaCapabilities(model)
+		item["info"] = map[string]any{
+			"meta": map[string]any{
+				"capabilities": map[string]any{"vision": true},
+			},
+		}
+	}
+	return item
+}
+
+func modelDetails(model config.Model) map[string]any {
+	details := copyMap(model.Details)
+	if isVisionModel(&model) {
+		details["families"] = appendStringValues(details["families"], "vision")
+		details["capabilities"] = mergeMap(details["capabilities"], map[string]any{"vision": true})
+	}
+	return details
+}
+
+func ollamaCapabilities(model config.Model) []string {
+	capabilities := []string{"completion"}
+	if isVisionModel(&model) {
+		capabilities = append(capabilities, "vision")
+	}
+	return capabilities
 }
 
 func translateOptions(req map[string]any) {
@@ -511,6 +535,14 @@ func translateChatImages(req map[string]any) (bool, error) {
 		if !ok {
 			continue
 		}
+		content, contentHasImages, err := normalizeOpenAIContentParts(message["content"])
+		if err != nil {
+			return false, err
+		}
+		if contentHasImages {
+			hasImages = true
+			message["content"] = content
+		}
 		images := stringList(message["images"])
 		if len(images) == 0 {
 			continue
@@ -520,6 +552,87 @@ func translateChatImages(req map[string]any) (bool, error) {
 		delete(message, "images")
 	}
 	return hasImages, nil
+}
+
+func normalizeOpenAIContentParts(content any) (any, bool, error) {
+	parts, ok := content.([]any)
+	if !ok {
+		return content, false, nil
+	}
+	hasImages := false
+	normalized := make([]any, 0, len(parts))
+	for _, part := range parts {
+		partMap, ok := part.(map[string]any)
+		if !ok {
+			normalized = append(normalized, part)
+			continue
+		}
+		out := copyMap(partMap)
+		partType, _ := out["type"].(string)
+		switch partType {
+		case "image_url":
+			imageURL, err := normalizeImageURLPart(out["image_url"])
+			if err != nil {
+				return nil, false, err
+			}
+			out["image_url"] = imageURL
+			hasImages = true
+		case "input_image":
+			imageURL, exists := out["image_url"]
+			if !exists {
+				normalized = append(normalized, out)
+				continue
+			}
+			normalizedURL, err := normalizeImageURLPart(imageURL)
+			if err != nil {
+				return nil, false, err
+			}
+			out["type"] = "image_url"
+			out["image_url"] = normalizedURL
+			hasImages = true
+		}
+		normalized = append(normalized, out)
+	}
+	return normalized, hasImages, nil
+}
+
+func normalizeImageURLPart(value any) (map[string]any, error) {
+	switch imageURL := value.(type) {
+	case string:
+		url, err := normalizeImageURL(imageURL)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"url": url}, nil
+	case map[string]any:
+		url, _ := imageURL["url"].(string)
+		normalizedURL, err := normalizeImageURL(url)
+		if err != nil {
+			return nil, err
+		}
+		out := copyMap(imageURL)
+		out["url"] = normalizedURL
+		return out, nil
+	default:
+		return nil, fmt.Errorf("image_url content part must be a string or object with a url")
+	}
+}
+
+func normalizeImageURL(url string) (string, error) {
+	url = strings.TrimSpace(url)
+	if url == "" {
+		return "", fmt.Errorf("image_url content part requires a non-empty url")
+	}
+	if strings.HasPrefix(url, "data:image/") {
+		return url, nil
+	}
+	if strings.HasPrefix(url, "data:") {
+		return "", fmt.Errorf("OpenArc VLM image_url content parts must use data:image URIs")
+	}
+	if strings.Contains(url, "://") || strings.HasPrefix(url, "/") {
+		return "", fmt.Errorf("OpenArc VLM image_url content parts must be converted to data:image URIs before reaching the wrapper")
+	}
+	return imageDataURL(url), nil
 }
 
 func ollamaGenerateMessages(req map[string]any, images []string) []any {
@@ -862,6 +975,55 @@ func (n *reasoningNormalizer) writeRune(parts *reasoningParts, r rune) {
 func isThinkTagPrefix(tag string) bool {
 	lower := strings.ToLower(tag)
 	return strings.HasPrefix("<think", lower) || strings.HasPrefix("</think", lower)
+}
+
+func copyMap(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func mergeMap(value any, defaults map[string]any) map[string]any {
+	out := copyMap(defaults)
+	if existing, ok := value.(map[string]any); ok {
+		for key, existingValue := range existing {
+			out[key] = existingValue
+		}
+	}
+	return out
+}
+
+func appendStringValues(value any, additions ...string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	add := func(text string) {
+		text = strings.TrimSpace(text)
+		if text == "" || seen[text] {
+			return
+		}
+		seen[text] = true
+		out = append(out, text)
+	}
+	switch values := value.(type) {
+	case []string:
+		for _, item := range values {
+			add(item)
+		}
+	case []any:
+		for _, item := range values {
+			if text, ok := item.(string); ok {
+				add(text)
+			}
+		}
+	case string:
+		add(values)
+	}
+	for _, item := range additions {
+		add(item)
+	}
+	return out
 }
 
 func parseKeepAlive(value any) (*time.Duration, error) {

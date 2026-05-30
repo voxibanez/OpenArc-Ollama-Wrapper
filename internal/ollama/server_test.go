@@ -85,6 +85,32 @@ models:
 	}
 }
 
+func TestTagModelAdvertisesVisionCapability(t *testing.T) {
+	model := config.Model{
+		Name:      "qwen3.5:4b",
+		ModelType: "vlm",
+		Details: map[string]any{
+			"family":   "qwen3_5",
+			"families": []any{"qwen3_5"},
+		},
+	}
+
+	item := tagModel(model)
+	details := item["details"].(map[string]any)
+	families := details["families"].([]string)
+	if len(families) != 2 || families[0] != "qwen3_5" || families[1] != "vision" {
+		t.Fatalf("families = %#v", families)
+	}
+	capabilities := details["capabilities"].(map[string]any)
+	if capabilities["vision"] != true {
+		t.Fatalf("details capabilities = %#v", capabilities)
+	}
+	infoCaps := item["info"].(map[string]any)["meta"].(map[string]any)["capabilities"].(map[string]any)
+	if infoCaps["vision"] != true {
+		t.Fatalf("info capabilities = %#v", infoCaps)
+	}
+}
+
 func TestUnknownModelReturns404BeforeDependencies(t *testing.T) {
 	server, hfCalls, oaCalls := testServer(t, `
 models:
@@ -240,6 +266,171 @@ func TestTranslateChatImagesToOpenAIContentParts(t *testing.T) {
 		t.Fatalf("image part = %#v", imagePart)
 	}
 	imageURL := imagePart["image_url"].(map[string]any)["url"]
+	if imageURL != "data:image/png;base64,aGVsbG8=" {
+		t.Fatalf("image url = %#v", imageURL)
+	}
+}
+
+func TestTranslateChatOpenAIImagePartsAreNormalized(t *testing.T) {
+	req := map[string]any{
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "text", "text": "what is this?"},
+					map[string]any{"type": "image_url", "image_url": "aGVsbG8="},
+				},
+			},
+		},
+	}
+	model := &config.Model{Name: "vision", ModelType: "vlm"}
+
+	_, err := translateImages(req, model, "/v1/chat/completions", "chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := req["messages"].([]any)[0].(map[string]any)["content"].([]any)
+	imagePart := parts[1].(map[string]any)
+	imageURL := imagePart["image_url"].(map[string]any)["url"]
+	if imageURL != "data:image/png;base64,aGVsbG8=" {
+		t.Fatalf("image url = %#v", imageURL)
+	}
+}
+
+func TestTranslateChatOpenAIImagePartsRejectNonVisionModel(t *testing.T) {
+	req := map[string]any{
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "text", "text": "what is this?"},
+					map[string]any{
+						"type":      "image_url",
+						"image_url": map[string]any{"url": "data:image/png;base64,aGVsbG8="},
+					},
+				},
+			},
+		},
+	}
+	model := &config.Model{Name: "text", ModelType: "llm"}
+
+	_, err := translateImages(req, model, "/v1/chat/completions", "chat")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "not configured as a vision model") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestTranslateChatImageURLRejectsUnconvertedURL(t *testing.T) {
+	req := map[string]any{
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "text", "text": "what is this?"},
+					map[string]any{
+						"type":      "image_url",
+						"image_url": map[string]any{"url": "http://openwebui/api/v1/files/1/content"},
+					},
+				},
+			},
+		},
+	}
+	model := &config.Model{Name: "vision", ModelType: "vlm"}
+
+	_, err := translateImages(req, model, "/v1/chat/completions", "chat")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "data:image") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestChatEndpointForwardsOpenWebUIOllamaImagesToOpenArcVLM(t *testing.T) {
+	dir := t.TempDir()
+	modelDir := filepath.Join(dir, "vision-model")
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modelDir, "openvino_model.xml"), []byte("<xml/>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modelDir, "openvino_model.bin"), []byte("bin"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(dir, "models.yaml")
+	manifestYAML := `models:
+  - name: vision
+    hf_repo: OpenVINO/vision
+    model_path: ` + modelDir + `
+    model_type: vlm
+`
+	if err := os.WriteFile(manifestPath, []byte(manifestYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := config.LoadManifest(manifestPath, filepath.Join(dir, "models"), "CPU")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var proxied map[string]any
+	hfCalls := &atomic.Int32{}
+	oaHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/openarc/status":
+			writeJSON(w, http.StatusOK, map[string]any{"models": []any{}})
+		case "/openarc/load":
+			writeJSON(w, http.StatusOK, map[string]any{"status": "loaded"})
+		case "/v1/chat/completions":
+			if err := json.NewDecoder(r.Body).Decode(&proxied); err != nil {
+				t.Fatal(err)
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"choices": []any{map[string]any{
+					"message": map[string]any{"content": "A small image."},
+				}},
+			})
+		default:
+			t.Fatalf("unexpected OpenArc path %s", r.URL.Path)
+		}
+	})
+	oaSrv := httptest.NewServer(oaHandler)
+	t.Cleanup(oaSrv.Close)
+	hfSrv := httptest.NewServer(countingHandler(hfCalls, http.NotFoundHandler()))
+	t.Cleanup(hfSrv.Close)
+	oaClient := openarc.NewClient(oaSrv.URL, "", oaSrv.Client())
+	manager := lifecycle.NewManager(manifest, oaClient, lifecycle.Options{
+		MaxLoadedModels:      1,
+		DefaultKeepAlive:     time.Minute,
+		CheckInterval:        time.Hour,
+		DownloadPollInterval: time.Millisecond,
+	})
+	server := NewServer(manifest, manager, oaClient, huggingface.NewClient(hfSrv.URL, "", hfSrv.Client()), 16<<20)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{
+		"model":"vision",
+		"stream":false,
+		"messages":[{"role":"user","content":"describe this","images":["aGVsbG8="]}]
+	}`))
+	rec := httptest.NewRecorder()
+	server.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if hfCalls.Load() != 0 {
+		t.Fatalf("local model path should avoid HF metadata call, hf=%d", hfCalls.Load())
+	}
+	messages := proxied["messages"].([]any)
+	user := messages[0].(map[string]any)
+	parts := user["content"].([]any)
+	if parts[0].(map[string]any)["text"] != "describe this" {
+		t.Fatalf("text part = %#v", parts[0])
+	}
+	imageURL := parts[1].(map[string]any)["image_url"].(map[string]any)["url"]
 	if imageURL != "data:image/png;base64,aGVsbG8=" {
 		t.Fatalf("image url = %#v", imageURL)
 	}
