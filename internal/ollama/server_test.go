@@ -196,6 +196,28 @@ func TestToOllamaChatResponseInfersMissingThinkStart(t *testing.T) {
 	}
 }
 
+func TestToOllamaChatResponseLabelsQwenThinkingProcess(t *testing.T) {
+	out := map[string]any{
+		"choices": []any{
+			map[string]any{
+				"message": map[string]any{
+					"content": "hinking Process:\nAnalyze the Input\n</think>\nHey!",
+				},
+			},
+		},
+	}
+
+	resp := toOllamaResponse(out, "qwen3.5:4b", "chat")
+	msg := resp["message"].(map[string]any)
+
+	if msg["thinking"] != "hinking Process:\nAnalyze the Input\n" {
+		t.Fatalf("thinking = %#v", msg["thinking"])
+	}
+	if msg["content"] != "\nHey!" {
+		t.Fatalf("content = %#v", msg["content"])
+	}
+}
+
 func TestToOllamaGenerateResponseUsesStructuredThinking(t *testing.T) {
 	out := map[string]any{
 		"choices": []any{

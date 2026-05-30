@@ -43,6 +43,11 @@ patches while upstream container publishing is still settling:
   OpenArc VLM loading handle OpenVINO exports whose local tokenizer metadata
   uses `tokenizer_class=TokenizersBackend` by falling back to the source
   tokenizer declared in `openvino_config.json`.
+- Applies `patches/openarc-reasoning-content.py` during the build. This makes
+  OpenArc's OpenAI-compatible chat route emit reasoning as
+  `reasoning_content` instead of raw `content` when models output
+  `<think>...</think>` or the known missing-opening-tag form ending in
+  `</think>`.
 - Cleans package and `uv` caches to avoid publishing unnecessary GHCR layer
   weight.
 

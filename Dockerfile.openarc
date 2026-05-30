@@ -41,9 +41,11 @@ ENV PATH="/root/.local/bin:$PATH"
 
 WORKDIR /app
 COPY patches/openarc-tokenizer-fallback.py /tmp/openarc-tokenizer-fallback.py
+COPY patches/openarc-reasoning-content.py /tmp/openarc-reasoning-content.py
 RUN git clone https://github.com/SearchSavior/OpenArc.git . && \
     git checkout "${OPENARC_REF}" && \
     python /tmp/openarc-tokenizer-fallback.py /app/src/engine/ov_genai/vlm.py && \
+    python /tmp/openarc-reasoning-content.py /app/src/server/routes/openai.py && \
     echo "OpenARC version: $(git describe --tags --always)"
 
 RUN uv sync && \
