@@ -24,8 +24,10 @@ func main() {
 	}
 
 	httpClient := &http.Client{Timeout: 0}
-	openArc := openarc.NewClient(cfg.OpenArcBaseURL, cfg.OpenArcAPIKey, httpClient)
-	hf := huggingface.NewClient(cfg.HuggingFaceBaseURL, cfg.HuggingFaceToken, &http.Client{Timeout: 30 * time.Second})
+	openArc := openarc.NewClient(cfg.OpenArcBaseURL, cfg.OpenArcAPIKey, httpClient).
+		WithLimits(cfg.MaxResponseBytes, cfg.MaxStreamLineBytes)
+	hf := huggingface.NewClient(cfg.HuggingFaceBaseURL, cfg.HuggingFaceToken, &http.Client{Timeout: 30 * time.Second}).
+		WithMaxMetadataBytes(cfg.MaxResponseBytes)
 	manager := lifecycle.NewManager(manifest, openArc, lifecycle.Options{
 		MaxLoadedModels:      cfg.MaxLoadedModels,
 		DefaultKeepAlive:     cfg.DefaultKeepAlive,
@@ -33,7 +35,7 @@ func main() {
 		DownloadPollInterval: cfg.DownloadPollInterval,
 	})
 
-	router := ollama.NewServer(manifest, manager, openArc, hf).Routes()
+	router := ollama.NewServer(manifest, manager, openArc, hf, cfg.MaxRequestBytes).Routes()
 
 	log.Printf("ollama-openarc listening on %s with %d manifest model(s)", cfg.ListenAddr, len(manifest.Models))
 	if err := http.ListenAndServe(cfg.ListenAddr, router); err != nil {

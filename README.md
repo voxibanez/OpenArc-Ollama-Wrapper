@@ -30,6 +30,23 @@ For local wrapper development, build the image from this checkout:
 docker compose -f docker-compose.yml -f compose.local-build.yml up --build
 ```
 
+## Memory diagnostics
+
+The facade is configured with conservative Go runtime limits by default:
+
+- `OLLAMA_FACADE_GOMEMLIMIT=128MiB`
+- `OLLAMA_FACADE_GOGC=50`
+- `MAX_REQUEST_BYTES=16777216`
+- `MAX_RESPONSE_BYTES=67108864`
+- `MAX_STREAM_LINE_BYTES=2097152`
+
+If the facade grows unexpectedly, capture profiles before it is killed:
+
+```sh
+curl -o heap.pb.gz http://localhost:11434/debug/pprof/heap
+curl -o goroutine.txt http://localhost:11434/debug/pprof/goroutine?debug=2
+```
+
 ## Manifest
 
 Each entry maps an Ollama-facing name to a Hugging Face repo containing

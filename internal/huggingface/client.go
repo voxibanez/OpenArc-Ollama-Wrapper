@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -13,9 +14,10 @@ import (
 )
 
 type Client struct {
-	baseURL string
-	token   string
-	http    *http.Client
+	baseURL          string
+	token            string
+	http             *http.Client
+	maxMetadataBytes int64
 }
 
 type ModelInfo struct {
@@ -32,7 +34,14 @@ func NewClient(baseURL, token string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), token: token, http: httpClient}
+	return &Client{baseURL: strings.TrimRight(baseURL, "/"), token: token, http: httpClient, maxMetadataBytes: 16 << 20}
+}
+
+func (c *Client) WithMaxMetadataBytes(maxBytes int64) *Client {
+	if maxBytes > 0 {
+		c.maxMetadataBytes = maxBytes
+	}
+	return c
 }
 
 func (c *Client) ModelInfo(ctx context.Context, repo, revision string) (ModelInfo, error) {
@@ -61,7 +70,7 @@ func (c *Client) ModelInfo(ctx context.Context, repo, revision string) (ModelInf
 		return ModelInfo{}, fmt.Errorf("huggingface metadata failed: %s", resp.Status)
 	}
 	var info ModelInfo
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, c.maxMetadataBytes)).Decode(&info); err != nil {
 		return ModelInfo{}, err
 	}
 	return info, nil

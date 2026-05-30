@@ -22,6 +22,9 @@ type AppConfig struct {
 	DefaultKeepAlive     time.Duration
 	IdleCheckInterval    time.Duration
 	DownloadPollInterval time.Duration
+	MaxRequestBytes      int64
+	MaxResponseBytes     int64
+	MaxStreamLineBytes   int
 }
 
 func LoadAppConfig() (AppConfig, error) {
@@ -38,6 +41,9 @@ func LoadAppConfig() (AppConfig, error) {
 		DefaultKeepAlive:     envDuration("DEFAULT_KEEP_ALIVE", time.Minute),
 		IdleCheckInterval:    envDuration("IDLE_CHECK_INTERVAL", 10*time.Second),
 		DownloadPollInterval: envDuration("DOWNLOAD_POLL_INTERVAL", time.Second),
+		MaxRequestBytes:      envInt64("MAX_REQUEST_BYTES", 16<<20),
+		MaxResponseBytes:     envInt64("MAX_RESPONSE_BYTES", 64<<20),
+		MaxStreamLineBytes:   envInt("MAX_STREAM_LINE_BYTES", 2<<20),
 	}
 	if cfg.MaxLoadedModels < 1 {
 		return cfg, errors.New("MAX_LOADED_MODELS must be at least 1")
@@ -55,6 +61,15 @@ func env(key, fallback string) string {
 func envInt(key string, fallback int) int {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
+func envInt64(key string, fallback int64) int64 {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			return n
 		}
 	}

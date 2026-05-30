@@ -44,7 +44,7 @@ func testServer(t *testing.T, manifestYAML string, hfHandler http.Handler, oaHan
 		DownloadPollInterval: time.Millisecond,
 	})
 	hfClient := huggingface.NewClient(hfSrv.URL, "", hfSrv.Client())
-	return NewServer(manifest, manager, oaClient, hfClient), hfCalls, oaCalls
+	return NewServer(manifest, manager, oaClient, hfClient, 16<<20), hfCalls, oaCalls
 }
 
 func countingHandler(count *atomic.Int32, next http.Handler) http.Handler {
@@ -101,6 +101,23 @@ models:
 	}
 	if hfCalls.Load() != 0 || oaCalls.Load() != 0 {
 		t.Fatalf("unknown model should not call dependencies, hf=%d oa=%d", hfCalls.Load(), oaCalls.Load())
+	}
+}
+
+func TestRequestBodyLimit(t *testing.T) {
+	server, _, _ := testServer(t, `
+models:
+  - name: known
+    hf_repo: OpenVINO/known-ov
+`, http.NotFoundHandler(), http.NotFoundHandler())
+	server.maxRequestBytes = 32
+
+	req := httptest.NewRequest(http.MethodPost, "/api/generate", strings.NewReader(`{"model":"known","prompt":"this request is intentionally too large"}`))
+	rec := httptest.NewRecorder()
+	server.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
 

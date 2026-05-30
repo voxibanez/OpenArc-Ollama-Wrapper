@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/pprof"
 	"strings"
 	"time"
 
@@ -18,18 +19,23 @@ import (
 )
 
 type Server struct {
-	manifest *config.Manifest
-	manager  *lifecycle.Manager
-	openarc  *openarc.Client
-	hf       *huggingface.Client
+	manifest        *config.Manifest
+	manager         *lifecycle.Manager
+	openarc         *openarc.Client
+	hf              *huggingface.Client
+	maxRequestBytes int64
 }
 
-func NewServer(manifest *config.Manifest, manager *lifecycle.Manager, openArc *openarc.Client, hf *huggingface.Client) *Server {
-	return &Server{manifest: manifest, manager: manager, openarc: openArc, hf: hf}
+func NewServer(manifest *config.Manifest, manager *lifecycle.Manager, openArc *openarc.Client, hf *huggingface.Client, maxRequestBytes int64) *Server {
+	if maxRequestBytes <= 0 {
+		maxRequestBytes = 16 << 20
+	}
+	return &Server{manifest: manifest, manager: manager, openarc: openArc, hf: hf, maxRequestBytes: maxRequestBytes}
 }
 
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
+	r.Use(s.limitRequestBody)
 	r.Get("/", s.version)
 	r.Get("/api/version", s.version)
 	r.Get("/api/tags", s.tags)
@@ -45,7 +51,23 @@ func (s *Server) Routes() http.Handler {
 	r.Post("/api/create", unsupported)
 	r.Post("/api/push", unsupported)
 	r.Post("/api/blobs/{digest}", unsupported)
+	r.HandleFunc("/debug/pprof/", pprof.Index)
+	r.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	r.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	r.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	r.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	r.Handle("/debug/pprof/allocs", pprof.Handler("allocs"))
+	r.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
+	r.Handle("/debug/pprof/heap", pprof.Handler("heap"))
+	r.Handle("/debug/pprof/threadcreate", pprof.Handler("threadcreate"))
 	return r
+}
+
+func (s *Server) limitRequestBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, s.maxRequestBytes)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) version(w http.ResponseWriter, r *http.Request) {

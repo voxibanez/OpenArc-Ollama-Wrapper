@@ -12,9 +12,11 @@ import (
 )
 
 type Client struct {
-	baseURL string
-	apiKey  string
-	http    *http.Client
+	baseURL            string
+	apiKey             string
+	http               *http.Client
+	maxResponseBytes   int64
+	maxStreamLineBytes int
 }
 
 type ModelLoadConfig struct {
@@ -55,7 +57,23 @@ func NewClient(baseURL, apiKey string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 0}
 	}
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), apiKey: apiKey, http: httpClient}
+	return &Client{
+		baseURL:            strings.TrimRight(baseURL, "/"),
+		apiKey:             apiKey,
+		http:               httpClient,
+		maxResponseBytes:   64 << 20,
+		maxStreamLineBytes: 2 << 20,
+	}
+}
+
+func (c *Client) WithLimits(maxResponseBytes int64, maxStreamLineBytes int) *Client {
+	if maxResponseBytes > 0 {
+		c.maxResponseBytes = maxResponseBytes
+	}
+	if maxStreamLineBytes > 0 {
+		c.maxStreamLineBytes = maxStreamLineBytes
+	}
+	return c
 }
 
 func (c *Client) Load(ctx context.Context, cfg ModelLoadConfig) error {
@@ -114,8 +132,7 @@ func (c *Client) StreamSSE(ctx context.Context, path string, payload any, onData
 		return fmt.Errorf("openarc stream failed: %s: %s", resp.Status, strings.TrimSpace(string(b)))
 	}
 	scanner := bufio.NewScanner(resp.Body)
-	buf := make([]byte, 0, 1024*1024)
-	scanner.Buffer(buf, 16*1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), c.maxStreamLineBytes)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if !strings.HasPrefix(line, "data:") {
@@ -163,7 +180,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, payload any, o
 		io.Copy(io.Discard, resp.Body)
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return json.NewDecoder(io.LimitReader(resp.Body, c.maxResponseBytes)).Decode(out)
 }
 
 func (c *Client) decorate(req *http.Request) {
