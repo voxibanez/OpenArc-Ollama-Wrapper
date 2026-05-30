@@ -16,6 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gpg \
     gpg-agent \
     wget \
+    gcc \
+    build-essential \
     python3 \
     python3-venv \
     python3-dev \
