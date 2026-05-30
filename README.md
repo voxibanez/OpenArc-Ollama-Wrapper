@@ -15,8 +15,10 @@ docker compose up -d
 
 The Ollama-compatible endpoint listens on `http://localhost:11434`.
 
-The default compose file pulls the wrapper image from GitHub Container Registry:
-`ghcr.io/voxibanez/openarc-ollama-wrapper:latest`.
+The default compose file pulls both images from GitHub Container Registry:
+
+- `ghcr.io/voxibanez/openarc:latest`
+- `ghcr.io/voxibanez/openarc-ollama-wrapper:latest`
 
 For local wrapper development, build the image from this checkout:
 

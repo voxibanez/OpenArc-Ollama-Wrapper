@@ -1,6 +1,6 @@
 services:
   openarc:
-    image: ${OPENARC_IMAGE:-openarc:latest}
+    image: ${OPENARC_IMAGE:-ghcr.io/voxibanez/openarc:latest}
     container_name: openarc
     devices:
       - /dev/dri:/dev/dri
