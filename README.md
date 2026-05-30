@@ -20,9 +20,31 @@ The default compose file pulls both images from GitHub Container Registry:
 - `ghcr.io/voxibanez/openarc:latest`
 - `ghcr.io/voxibanez/openarc-ollama-wrapper:latest`
 
-The `openarc` image is built from upstream `SearchSavior/OpenArc` with the NPU
-driver source build disabled. CPU and Intel GPU runtime packages are still
-installed; NPU support should use a custom OpenArc image.
+## Custom OpenArc Image
+
+This repo publishes a custom `ghcr.io/voxibanez/openarc:latest` image for
+compose deployments. It is still built from upstream
+`SearchSavior/OpenArc`, but `Dockerfile.openarc` carries a few deployment
+patches while upstream container publishing is still settling:
+
+- Skips the upstream `intel/linux-npu-driver` source build. That path depends on
+  transient Launchpad snapshot downloads and has failed in GitHub Actions. CPU
+  and Intel GPU runtime packages are still installed; NPU support should use a
+  custom OpenArc image.
+- Installs Intel Arc GPU userspace packages:
+  `intel-opencl-icd`, `intel-level-zero-gpu`, `level-zero`, and
+  `level-zero-dev`.
+- Keeps `gcc`/`build-essential` in the build image because OpenArc's Python
+  dependency tree can compile native extensions, including `evdev` through
+  `pynput`.
+- Installs current OpenVINO runtime pieces with `uv`, including
+  `optimum-intel[openvino]`, `openvino-genai`, and `openvino-tokenizers`.
+- Applies `patches/openarc-tokenizer-fallback.py` during the build. This lets
+  OpenArc VLM loading handle OpenVINO exports whose local tokenizer metadata
+  uses `tokenizer_class=TokenizersBackend` by falling back to the source
+  tokenizer declared in `openvino_config.json`.
+- Cleans package and `uv` caches to avoid publishing unnecessary GHCR layer
+  weight.
 
 The OpenArc image is large because it includes OpenVINO, OpenVINO GenAI,
 Optimum, PyTorch CPU wheels, and Intel GPU runtime packages. Slow pulls usually
