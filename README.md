@@ -20,6 +20,10 @@ The default compose file pulls both images from GitHub Container Registry:
 - `ghcr.io/voxibanez/openarc:latest`
 - `ghcr.io/voxibanez/openarc-ollama-wrapper:latest`
 
+The `openarc` image is built from upstream `SearchSavior/OpenArc` with the NPU
+driver source build disabled. CPU and Intel GPU runtime packages are still
+installed; NPU support should use a custom OpenArc image.
+
 For local wrapper development, build the image from this checkout:
 
 ```sh

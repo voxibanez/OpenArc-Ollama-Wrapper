@@ -107,8 +107,10 @@ jobs:
       - name: Build and publish OpenArc
         uses: docker/build-push-action@v6
         with:
-          context: https://github.com/SearchSavior/OpenArc.git#main
-          file: Dockerfile
+          context: .
+          file: Dockerfile.openarc
+          build-args: |
+            OPENARC_REF=main
           platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta-openarc.outputs.tags }}
