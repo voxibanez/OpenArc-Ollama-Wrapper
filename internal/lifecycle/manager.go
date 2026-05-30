@@ -90,6 +90,14 @@ func (m *Manager) EnsureLoaded(ctx context.Context, model *config.Model, keepAli
 		st.active--
 		return nil, fmt.Errorf("local OpenVINO validation failed for %s: %w", model.Name, err)
 	}
+	if loaded, err := m.openArcHasModelLoaded(ctx, model.Name); err != nil {
+		st.active--
+		return nil, err
+	} else if loaded {
+		st.loaded = true
+		st.lastUsed = time.Now()
+		return lease, nil
+	}
 	if err := m.evictIfNeeded(ctx, model.Name); err != nil {
 		st.active--
 		return nil, err
@@ -178,6 +186,19 @@ func (m *Manager) downloadAndWait(ctx context.Context, model *config.Model) erro
 			}
 		}
 	}
+}
+
+func (m *Manager) openArcHasModelLoaded(ctx context.Context, modelName string) (bool, error) {
+	status, err := m.openarc.Status(ctx)
+	if err != nil {
+		return false, fmt.Errorf("openarc status check failed before loading %s: %w", modelName, err)
+	}
+	for _, loaded := range status.Models {
+		if loaded.ModelName == modelName && loaded.Status != "unloaded" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (m *Manager) evictIfNeeded(ctx context.Context, incoming string) error {
