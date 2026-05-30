@@ -1,0 +1,41 @@
+services:
+  openarc:
+    image: ${OPENARC_IMAGE:-openarc:latest}
+    container_name: openarc
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - ${MODEL_PATH:-./models}:/models
+      - openarc-config:/persist
+    environment:
+      OPENARC_API_KEY: ${OPENARC_API_KEY:-openarc-default-key}
+      OPENARC_MODELS_DIR: /models
+      NEOReadDebugKeys: "1"
+      OverrideGpuAddressSpace: "48"
+      EnableImplicitScaling: "1"
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  ollama-facade:
+    image: ${OLLAMA_FACADE_IMAGE:-ghcr.io/voxibanez/openarc-ollama-wrapper:latest}
+    container_name: ollama-openarc
+    depends_on:
+      - openarc
+    volumes:
+      - ${MODEL_PATH:-./models}:/models
+      - ./models.yaml:/config/models.yaml:ro
+    environment:
+      OPENARC_BASE_URL: http://openarc:8000
+      OPENARC_API_KEY: ${OPENARC_API_KEY:-openarc-default-key}
+      MODEL_PATH: /models
+      MODEL_MANIFEST: /config/models.yaml
+      MAX_LOADED_MODELS: ${MAX_LOADED_MODELS:-1}
+      DEFAULT_KEEP_ALIVE: ${DEFAULT_KEEP_ALIVE:-60s}
+      OPENARC_DEFAULT_DEVICE: ${OPENARC_DEFAULT_DEVICE:-GPU.0}
+    ports:
+      - "11434:11434"
+    restart: unless-stopped
+
+volumes:
+  openarc-config:

@@ -1,0 +1,4 @@
+services:
+  ollama-facade:
+    build: .
+    image: ${OLLAMA_FACADE_IMAGE:-ghcr.io/voxibanez/openarc-ollama-wrapper:latest}

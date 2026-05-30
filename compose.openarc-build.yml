@@ -1,0 +1,5 @@
+services:
+  openarc:
+    build:
+      context: ${OPENARC_SOURCE_DIR:-../OpenArc}
+    image: ${OPENARC_IMAGE:-openarc:latest}

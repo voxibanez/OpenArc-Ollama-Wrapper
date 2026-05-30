@@ -1,0 +1,12 @@
+models:
+  - name: qwen3-1.7b
+    aliases:
+      - qwen3:1.7b
+    hf_repo: Echo9Zulu/Qwen3-1.7B-int8_asym-ov
+    engine: ovgenai
+    model_type: llm
+    device: GPU.0
+    details:
+      family: qwen3
+      parameter_size: 1.7B
+      quantization_level: int8_asym
