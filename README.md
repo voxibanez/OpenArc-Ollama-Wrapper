@@ -48,6 +48,9 @@ patches while upstream container publishing is still settling:
   `reasoning_content` instead of raw `content` when models output
   `<think>...</think>` or the known missing-opening-tag form ending in
   `</think>`.
+- Applies `patches/openarc-streaming-unicode.py` during the build. This holds
+  back unstable streaming tokenizer deltas that contain the Unicode replacement
+  character `U+FFFD` and drops any replacement characters that never stabilize.
 - Cleans package and `uv` caches to avoid publishing unnecessary GHCR layer
   weight.
 

@@ -174,6 +174,37 @@ func TestToOllamaChatResponseSeparatesThinkingTags(t *testing.T) {
 	}
 }
 
+func TestToOllamaChatResponseRemovesReplacementCharacter(t *testing.T) {
+	out := map[string]any{
+		"choices": []any{
+			map[string]any{
+				"message": map[string]any{
+					"content": "Hey there! \uFFFD How can I help?",
+				},
+			},
+		},
+	}
+
+	resp := toOllamaResponse(out, "qwen3.5:4b", "chat")
+	msg := resp["message"].(map[string]any)
+
+	if msg["content"] != "Hey there!  How can I help?" {
+		t.Fatalf("content = %#v", msg["content"])
+	}
+}
+
+func TestStreamChatResponseRemovesReplacementCharacter(t *testing.T) {
+	normalizer := newReasoningNormalizer("llama3.2:3b")
+	chunk := streamChunkToOllama(map[string]any{
+		"choices": []any{map[string]any{"delta": map[string]any{"content": "Hi \uFFFD there"}}},
+	}, "llama3.2:3b", "chat", normalizer)
+	msg := chunk["message"].(map[string]any)
+
+	if msg["content"] != "Hi  there" {
+		t.Fatalf("content = %#v", msg["content"])
+	}
+}
+
 func TestTranslateChatImagesToOpenAIContentParts(t *testing.T) {
 	req := map[string]any{
 		"messages": []any{

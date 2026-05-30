@@ -585,6 +585,10 @@ func isVisionModel(model *config.Model) bool {
 	return strings.EqualFold(model.ModelType, "vlm")
 }
 
+func sanitizeGeneratedText(text string) string {
+	return strings.ReplaceAll(text, "\uFFFD", "")
+}
+
 func toOllamaResponse(out map[string]any, modelName, mode string) map[string]any {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	normalizer := newReasoningNormalizer(modelName)
@@ -602,6 +606,8 @@ func toOllamaResponse(out map[string]any, modelName, mode string) map[string]any
 				}
 			}
 		}
+		content = sanitizeGeneratedText(content)
+		thinking = sanitizeGeneratedText(thinking)
 		parts := normalizer.Process(content)
 		flush := normalizer.Flush()
 		parts.Thinking += flush.Thinking
@@ -635,6 +641,8 @@ func toOllamaResponse(out map[string]any, modelName, mode string) map[string]any
 				}
 			}
 		}
+		text = sanitizeGeneratedText(text)
+		thinking = sanitizeGeneratedText(thinking)
 	}
 	parts := normalizer.Process(text)
 	flush := normalizer.Flush()
@@ -667,6 +675,8 @@ func streamChunkToOllama(chunk map[string]any, modelName, mode string, normalize
 				thinking, _ = delta["thinking"].(string)
 			}
 		}
+		content = sanitizeGeneratedText(content)
+		thinking = sanitizeGeneratedText(thinking)
 		done := choice["finish_reason"] != nil
 		parts := normalizer.Process(content)
 		if done {
@@ -701,6 +711,8 @@ func streamChunkToOllama(chunk map[string]any, modelName, mode string, normalize
 			}
 		}
 	}
+	text = sanitizeGeneratedText(text)
+	thinking = sanitizeGeneratedText(thinking)
 	done := choice["finish_reason"] != nil
 	parts := normalizer.Process(text)
 	if done {
