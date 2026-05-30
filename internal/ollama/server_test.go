@@ -151,3 +151,89 @@ models:
 		t.Fatalf("expected OpenVINO error, got %s", rec.Body.String())
 	}
 }
+
+func TestToOllamaChatResponseSeparatesThinkingTags(t *testing.T) {
+	out := map[string]any{
+		"choices": []any{
+			map[string]any{
+				"message": map[string]any{
+					"content": "<think>\nchecking\n</think>\nHello",
+				},
+			},
+		},
+	}
+
+	resp := toOllamaResponse(out, "deepseek-r1:7b", "chat")
+	msg := resp["message"].(map[string]any)
+
+	if msg["thinking"] != "\nchecking\n" {
+		t.Fatalf("thinking = %#v", msg["thinking"])
+	}
+	if msg["content"] != "\nHello" {
+		t.Fatalf("content = %#v", msg["content"])
+	}
+}
+
+func TestToOllamaChatResponseInfersMissingThinkStart(t *testing.T) {
+	out := map[string]any{
+		"choices": []any{
+			map[string]any{
+				"message": map[string]any{
+					"content": "I should answer casually.\n</think>\nHey!",
+				},
+			},
+		},
+	}
+
+	resp := toOllamaResponse(out, "deepseek-r1:7b", "chat")
+	msg := resp["message"].(map[string]any)
+
+	if msg["thinking"] != "I should answer casually.\n" {
+		t.Fatalf("thinking = %#v", msg["thinking"])
+	}
+	if msg["content"] != "\nHey!" {
+		t.Fatalf("content = %#v", msg["content"])
+	}
+}
+
+func TestToOllamaGenerateResponseUsesStructuredThinking(t *testing.T) {
+	out := map[string]any{
+		"choices": []any{
+			map[string]any{
+				"text":              "Answer",
+				"reasoning_content": "Reasoning",
+			},
+		},
+	}
+
+	resp := toOllamaResponse(out, "deepseek-r1:7b", "generate")
+
+	if resp["thinking"] != "Reasoning" {
+		t.Fatalf("thinking = %#v", resp["thinking"])
+	}
+	if resp["response"] != "Answer" {
+		t.Fatalf("response = %#v", resp["response"])
+	}
+}
+
+func TestStreamChatResponseSeparatesThinkingAcrossChunks(t *testing.T) {
+	normalizer := newReasoningNormalizer("deepseek-r1:7b")
+	first := streamChunkToOllama(map[string]any{
+		"choices": []any{map[string]any{"delta": map[string]any{"content": "I should answer"}}},
+	}, "deepseek-r1:7b", "chat", normalizer)
+	if first != nil {
+		t.Fatalf("first chunk should be buffered, got %#v", first)
+	}
+
+	second := streamChunkToOllama(map[string]any{
+		"choices": []any{map[string]any{"delta": map[string]any{"content": ".\n</think>\nHey"}}},
+	}, "deepseek-r1:7b", "chat", normalizer)
+	msg := second["message"].(map[string]any)
+
+	if msg["thinking"] != "I should answer.\n" {
+		t.Fatalf("thinking = %#v", msg["thinking"])
+	}
+	if msg["content"] != "\nHey" {
+		t.Fatalf("content = %#v", msg["content"])
+	}
+}

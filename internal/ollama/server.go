@@ -329,6 +329,7 @@ func (s *Server) infer(w http.ResponseWriter, r *http.Request, req map[string]an
 	defer lease.Done(r.Context())
 	req["model"] = model.Name
 	translateOptions(req)
+	translateThinking(req, mode)
 	stream, _ := req["stream"].(bool)
 	if stream {
 		s.streamInference(w, r, req, path, model.Name, mode)
@@ -374,8 +375,9 @@ func (s *Server) streamInference(w http.ResponseWriter, r *http.Request, req map
 	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
+	normalizer := newReasoningNormalizer(modelName)
 	err := s.openarc.StreamSSE(r.Context(), path, req, func(chunk map[string]any) error {
-		payload := streamChunkToOllama(chunk, modelName, mode)
+		payload := streamChunkToOllama(chunk, modelName, mode, normalizer)
 		if payload == nil {
 			return nil
 		}
@@ -436,29 +438,83 @@ func translateOptions(req map[string]any) {
 	delete(req, "options")
 }
 
+func translateThinking(req map[string]any, mode string) {
+	if mode != "chat" {
+		delete(req, "think")
+		return
+	}
+	think, ok := req["think"]
+	if !ok {
+		return
+	}
+	enabled := false
+	switch val := think.(type) {
+	case bool:
+		enabled = val
+	case string:
+		enabled = val != "" && val != "false"
+	}
+	templateKwargs, _ := req["chat_template_kwargs"].(map[string]any)
+	if templateKwargs == nil {
+		templateKwargs = map[string]any{}
+		req["chat_template_kwargs"] = templateKwargs
+	}
+	if _, exists := templateKwargs["enable_thinking"]; !exists {
+		templateKwargs["enable_thinking"] = enabled
+	}
+	delete(req, "think")
+}
+
 func toOllamaResponse(out map[string]any, modelName, mode string) map[string]any {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	normalizer := newReasoningNormalizer(modelName)
 	if mode == "chat" {
 		content := ""
+		thinking := ""
 		if choices, ok := out["choices"].([]any); ok && len(choices) > 0 {
 			if choice, ok := choices[0].(map[string]any); ok {
 				if msg, ok := choice["message"].(map[string]any); ok {
 					content, _ = msg["content"].(string)
+					thinking, _ = msg["reasoning_content"].(string)
+					if thinking == "" {
+						thinking, _ = msg["thinking"].(string)
+					}
 				}
 			}
 		}
-		return map[string]any{"model": modelName, "created_at": now, "message": map[string]any{"role": "assistant", "content": content}, "done": true}
+		parts := normalizer.Process(content)
+		flush := normalizer.Flush()
+		parts.Thinking += flush.Thinking
+		parts.Content += flush.Content
+		msg := map[string]any{"role": "assistant", "content": parts.Content}
+		if thinking != "" || parts.Thinking != "" {
+			msg["thinking"] = thinking + parts.Thinking
+		}
+		return map[string]any{"model": modelName, "created_at": now, "message": msg, "done": true}
 	}
 	text := ""
+	thinking := ""
 	if choices, ok := out["choices"].([]any); ok && len(choices) > 0 {
 		if choice, ok := choices[0].(map[string]any); ok {
 			text, _ = choice["text"].(string)
+			thinking, _ = choice["reasoning_content"].(string)
+			if thinking == "" {
+				thinking, _ = choice["thinking"].(string)
+			}
 		}
 	}
-	return map[string]any{"model": modelName, "created_at": now, "response": text, "done": true}
+	parts := normalizer.Process(text)
+	flush := normalizer.Flush()
+	parts.Thinking += flush.Thinking
+	parts.Content += flush.Content
+	resp := map[string]any{"model": modelName, "created_at": now, "response": parts.Content, "done": true}
+	if thinking != "" || parts.Thinking != "" {
+		resp["thinking"] = thinking + parts.Thinking
+	}
+	return resp
 }
 
-func streamChunkToOllama(chunk map[string]any, modelName, mode string) map[string]any {
+func streamChunkToOllama(chunk map[string]any, modelName, mode string, normalizer *reasoningNormalizer) map[string]any {
 	choices, ok := chunk["choices"].([]any)
 	if !ok || len(choices) == 0 {
 		return nil
@@ -470,15 +526,184 @@ func streamChunkToOllama(chunk map[string]any, modelName, mode string) map[strin
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if mode == "chat" {
 		content := ""
+		thinking := ""
 		if delta, ok := choice["delta"].(map[string]any); ok {
 			content, _ = delta["content"].(string)
+			thinking, _ = delta["reasoning_content"].(string)
+			if thinking == "" {
+				thinking, _ = delta["thinking"].(string)
+			}
 		}
 		done := choice["finish_reason"] != nil
-		return map[string]any{"model": modelName, "created_at": now, "message": map[string]any{"role": "assistant", "content": content}, "done": done}
+		parts := normalizer.Process(content)
+		if done {
+			flush := normalizer.Flush()
+			parts.Thinking += flush.Thinking
+			parts.Content += flush.Content
+		}
+		msg := map[string]any{"role": "assistant", "content": parts.Content}
+		if thinking != "" || parts.Thinking != "" {
+			msg["thinking"] = thinking + parts.Thinking
+		}
+		if msg["content"] == "" && msg["thinking"] == nil && !done {
+			return nil
+		}
+		return map[string]any{"model": modelName, "created_at": now, "message": msg, "done": done}
 	}
 	text, _ := choice["text"].(string)
+	thinking, _ := choice["reasoning_content"].(string)
+	if thinking == "" {
+		thinking, _ = choice["thinking"].(string)
+	}
 	done := choice["finish_reason"] != nil
-	return map[string]any{"model": modelName, "created_at": now, "response": text, "done": done}
+	parts := normalizer.Process(text)
+	if done {
+		flush := normalizer.Flush()
+		parts.Thinking += flush.Thinking
+		parts.Content += flush.Content
+	}
+	payload := map[string]any{"model": modelName, "created_at": now, "response": parts.Content, "done": done}
+	if thinking != "" || parts.Thinking != "" {
+		payload["thinking"] = thinking + parts.Thinking
+	}
+	if payload["response"] == "" && payload["thinking"] == nil && !done {
+		return nil
+	}
+	return payload
+}
+
+type reasoningParts struct {
+	Thinking string
+	Content  string
+}
+
+type reasoningNormalizer struct {
+	reasoningModel bool
+	probing        bool
+	probe          string
+	inThink        bool
+	tag            string
+}
+
+func newReasoningNormalizer(modelName string) *reasoningNormalizer {
+	reasoning := isReasoningModel(modelName)
+	return &reasoningNormalizer{reasoningModel: reasoning, probing: reasoning}
+}
+
+func isReasoningModel(modelName string) bool {
+	name := strings.ToLower(modelName)
+	return strings.Contains(name, "deepseek-r1") ||
+		strings.Contains(name, "qwen3") ||
+		strings.Contains(name, "reason") ||
+		strings.Contains(name, "thinking")
+}
+
+func (n *reasoningNormalizer) Process(text string) reasoningParts {
+	if text == "" {
+		return reasoningParts{}
+	}
+	if n.probing {
+		n.probe += text
+		lower := strings.ToLower(n.probe)
+		if openAt := strings.Index(lower, "<think"); openAt >= 0 {
+			if openEnd := strings.Index(lower[openAt:], ">"); openEnd >= 0 {
+				before := n.probe[:openAt]
+				after := n.probe[openAt+openEnd+1:]
+				n.probe = ""
+				n.probing = false
+				n.inThink = true
+				parts := n.processTagged(after)
+				parts.Content = before + parts.Content
+				return parts
+			}
+		}
+		if closeAt := strings.Index(lower, "</think>"); closeAt >= 0 {
+			thinking := n.probe[:closeAt]
+			after := n.probe[closeAt+len("</think>"):]
+			n.probe = ""
+			n.probing = false
+			n.inThink = false
+			parts := n.processTagged(after)
+			parts.Thinking = thinking + parts.Thinking
+			return parts
+		}
+		if len(n.probe) < 8192 {
+			return reasoningParts{}
+		}
+		text = n.probe
+		n.probe = ""
+		n.probing = false
+	}
+	return n.processTagged(text)
+}
+
+func (n *reasoningNormalizer) Flush() reasoningParts {
+	var parts reasoningParts
+	if n.probe != "" {
+		parts.Content = n.probe
+		n.probe = ""
+		n.probing = false
+	}
+	if n.tag != "" {
+		n.writeText(&parts, n.tag)
+		n.tag = ""
+	}
+	return parts
+}
+
+func (n *reasoningNormalizer) processTagged(text string) reasoningParts {
+	var parts reasoningParts
+	for _, r := range text {
+		if n.tag != "" {
+			n.tag += string(r)
+			if strings.Contains(n.tag, ">") {
+				tag := strings.ToLower(n.tag)
+				switch {
+				case strings.HasPrefix(tag, "<think"):
+					n.inThink = true
+				case strings.HasPrefix(tag, "</think"):
+					n.inThink = false
+				default:
+					n.writeText(&parts, n.tag)
+				}
+				n.tag = ""
+				continue
+			}
+			if isThinkTagPrefix(n.tag) {
+				continue
+			}
+			n.writeText(&parts, n.tag)
+			n.tag = ""
+			continue
+		}
+		if r == '<' {
+			n.tag = "<"
+			continue
+		}
+		n.writeRune(&parts, r)
+	}
+	return parts
+}
+
+func (n *reasoningNormalizer) writeText(parts *reasoningParts, text string) {
+	if n.inThink {
+		parts.Thinking += text
+		return
+	}
+	parts.Content += text
+}
+
+func (n *reasoningNormalizer) writeRune(parts *reasoningParts, r rune) {
+	if n.inThink {
+		parts.Thinking += string(r)
+		return
+	}
+	parts.Content += string(r)
+}
+
+func isThinkTagPrefix(tag string) bool {
+	lower := strings.ToLower(tag)
+	return strings.HasPrefix("<think", lower) || strings.HasPrefix("</think", lower)
 }
 
 func parseKeepAlive(value any) (*time.Duration, error) {
