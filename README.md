@@ -24,6 +24,11 @@ The `openarc` image is built from upstream `SearchSavior/OpenArc` with the NPU
 driver source build disabled. CPU and Intel GPU runtime packages are still
 installed; NPU support should use a custom OpenArc image.
 
+The OpenArc image is large because it includes OpenVINO, OpenVINO GenAI,
+Optimum, PyTorch CPU wheels, and Intel GPU runtime packages. Slow pulls usually
+stall on the dependency layer; they are normally bandwidth-bound rather than a
+facade failure.
+
 For local wrapper development, build the image from this checkout:
 
 ```sh
