@@ -10,7 +10,11 @@ def main() -> None:
     path = Path(sys.argv[1])
     source = path.read_text()
 
-    old_write = '''        # Only emit when we've reached the chunk boundary
+    if "    def _emit_decoded(" in source:
+        return
+
+    old_write_variants = [
+        '''        # Only emit when we've reached the chunk boundary
         if self.since_last_emit >= self.tokens_len:
             text = self.decoder_tokenizer.decode(self.tokens_cache)
             # Emit only the newly materialized portion
@@ -20,15 +24,33 @@ def main() -> None:
                     self.text_queue.put_nowait(chunk)
                 self.last_print_len = len(text)
             self.since_last_emit = 0
-'''
+''',
+        '''        # Only emit when we've reached the chunk boundary
+        if self.since_last_emit >= self.tokens_len:
+            text = self.decoder_tokenizer.decode(self.tokens_cache)
+            # Emit only the newly materialized portion
+            if len(text) > self.last_print_len:
+                chunk = text[self.last_print_len:]
+                if chr(65533) in chunk:
+                    self.since_last_emit -= 1
+                    return openvino_genai.StreamingStatus.RUNNING
+                if chunk:
+                    self.text_queue.put_nowait(chunk)
+                self.last_print_len = len(text)
+            self.since_last_emit = 0
+''',
+    ]
     new_write = '''        # Only emit when we've reached the chunk boundary
         if self.since_last_emit >= self.tokens_len:
             self._emit_decoded(final=False)
             self.since_last_emit = 0
 '''
-    if old_write not in source:
+    for old_write in old_write_variants:
+        if old_write in source:
+            source = source.replace(old_write, new_write, 1)
+            break
+    else:
         raise SystemExit("write emission block not found")
-    source = source.replace(old_write, new_write, 1)
 
     helper = '''    def _emit_decoded(self, final: bool = False) -> None:
         text = self.decoder_tokenizer.decode(self.tokens_cache)
@@ -60,8 +82,7 @@ def main() -> None:
         self.last_print_len = len(text)
 
 '''
-    if "    def _emit_decoded(" not in source:
-        source = source.replace("    def cancel(self) -> None:\n", helper + "    def cancel(self) -> None:\n", 1)
+    source = source.replace("    def cancel(self) -> None:\n", helper + "    def cancel(self) -> None:\n", 1)
 
     old_end = '''    def end(self) -> None:
         # Flush any remaining tokens at the end

@@ -65,6 +65,84 @@ For local wrapper development, build the image from this checkout:
 docker compose -f docker-compose.yml -f compose.local-build.yml up --build
 ```
 
+## Native Proxmox LXC installation
+
+Docker is not required inside an LXC. The native installer runs OpenArc and the
+Go facade as separate systemd services and exposes only the Ollama-compatible
+API on port `11434`.
+
+The installer currently targets an `amd64` Ubuntu 24.04 LXC. Give it at least
+12 GB RAM, with 16 GB preferred for larger models and VLM image processing.
+
+First, on the Proxmox host, identify the Intel Arc render node:
+
+```sh
+ls -l /dev/dri
+lspci -nnk | grep -A3 -Ei 'VGA|Display'
+```
+
+Inside the LXC, get the numeric `render` group ID:
+
+```sh
+getent group render
+```
+
+Stop the LXC and pass the Arc render node through. Replace `120`, `renderD129`,
+and `104` with the actual container ID, device, and in-container render GID:
+
+```sh
+pct stop 120
+pct set 120 -dev0 path=/dev/dri/renderD129,gid=104,mode=0660
+pct start 120
+```
+
+PCI/VFIO passthrough is not needed for an LXC. The installer must see a
+`/dev/dri/renderD*` character device before it starts.
+
+Clone this repository inside the LXC and run:
+
+```sh
+git clone https://github.com/voxibanez/OpenArc-Ollama-Wrapper.git
+cd OpenArc-Ollama-Wrapper
+sudo ./deploy/lxc/install.sh
+```
+
+By default, the installer copies the repository's `models.yaml` only when
+`/etc/openarc/models.yaml` does not already exist. To install a private
+manifest from another path:
+
+```sh
+sudo env \
+  MANIFEST_SOURCE=/root/models.yaml \
+  OPENARC_API_KEY='replace-with-a-secret' \
+  HUGGINGFACE_TOKEN='optional-private-repo-token' \
+  ./deploy/lxc/install.sh
+```
+
+Set `REPLACE_MANIFEST=1` to deliberately replace an existing installed
+manifest. Existing `/etc/openarc/openarc.env` configuration is otherwise
+preserved on reruns.
+
+The native installation uses:
+
+- `/opt/openarc` for the patched OpenArc checkout and Python environment.
+- `/usr/local/bin/ollama-openarc` for the compiled Go facade.
+- `/var/lib/openarc/models` for downloaded models.
+- `/etc/openarc/models.yaml` for the private model manifest.
+- `/etc/openarc/openarc.env` for service configuration and secrets.
+
+Verify the installation:
+
+```sh
+systemctl status openarc ollama-openarc
+curl http://127.0.0.1:11434/api/version
+curl http://127.0.0.1:11434/api/tags
+journalctl -u openarc -u ollama-openarc -f
+```
+
+The installer applies the same tokenizer, reasoning-content, and streaming
+Unicode patches used by the custom OpenArc container image.
+
 ## Memory diagnostics
 
 The facade is configured with conservative Go runtime limits by default:

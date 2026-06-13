@@ -38,6 +38,11 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Validate native deployment scripts
+        run: |
+          bash -n deploy/lxc/install.sh
+          python3 -m py_compile patches/*.py
+
   build:
     runs-on: ubuntu-latest
     needs: test
