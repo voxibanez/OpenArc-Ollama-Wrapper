@@ -113,6 +113,16 @@ func (c *Client) ProxyJSON(ctx context.Context, path string, payload any) (map[s
 }
 
 func (c *Client) StreamSSE(ctx context.Context, path string, payload any, onData func(map[string]any) error) error {
+	return c.StreamSSEWithStart(ctx, path, payload, nil, onData)
+}
+
+func (c *Client) StreamSSEWithStart(
+	ctx context.Context,
+	path string,
+	payload any,
+	onStart func(),
+	onData func(map[string]any) error,
+) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -130,6 +140,9 @@ func (c *Client) StreamSSE(ctx context.Context, path string, payload any, onData
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("openarc stream failed: %s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	if onStart != nil {
+		onStart()
 	}
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), c.maxStreamLineBytes)

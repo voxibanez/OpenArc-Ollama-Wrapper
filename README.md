@@ -1,7 +1,8 @@
 # OpenArc Ollama Wrapper
 
-Go sidecar that exposes Ollama-style `/api/*` endpoints and delegates model
-download, load, inference, and unload to [OpenArc](https://github.com/SearchSavior/OpenArc).
+Go sidecar that exposes Ollama-style `/api/*` and OpenAI-compatible `/v1/*`
+endpoints and delegates model download, load, inference, and unload to
+[OpenArc](https://github.com/SearchSavior/OpenArc).
 
 Models are manifest-only. Add every user-visible model to `models.yaml`; unknown
 model names return `404` and are never guessed.
@@ -19,6 +20,57 @@ The default compose file pulls both images from GitHub Container Registry:
 
 - `ghcr.io/voxibanez/openarc:latest`
 - `ghcr.io/voxibanez/openarc-ollama-wrapper:latest`
+
+## OpenAI-compatible API
+
+Point OpenAI clients at `http://localhost:11434/v1`. The facade supports:
+
+- `GET /v1/models`
+- `GET /v1/models/{model}`
+- `POST /v1/chat/completions`
+- `POST /v1/completions`
+- `POST /v1/embeddings`
+
+`/v1/models` returns every model declared in `models.yaml`, including models
+that have not been downloaded or loaded yet. Inference requests use the same
+lifecycle manager as the Ollama API: the facade downloads missing models,
+reuses an already loaded model, evicts an idle model when the configured limit
+is reached, and unloads models after `DEFAULT_KEEP_ALIVE`.
+
+Example:
+
+```sh
+curl http://localhost:11434/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "qwen3:1.7b",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "stream": false
+  }'
+```
+
+Many OpenAI SDKs require an API key value even when the target does not
+authenticate it:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:11434/v1",
+    api_key="not-used",
+)
+
+response = client.chat.completions.create(
+    model="qwen3:1.7b",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+```
+
+The default idle lifetime comes from `DEFAULT_KEEP_ALIVE`. For a per-request
+override, send `X-OpenArc-Keep-Alive` with a duration such as `10m`, or `0` to
+unload immediately after the request or stream completes. A top-level
+`keep_alive` request extension is also accepted and removed before forwarding
+the request to OpenArc.
 
 ## Custom OpenArc Image
 

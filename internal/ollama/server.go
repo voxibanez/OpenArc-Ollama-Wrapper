@@ -51,6 +51,11 @@ func (s *Server) Routes() http.Handler {
 	r.Post("/api/create", unsupported)
 	r.Post("/api/push", unsupported)
 	r.Post("/api/blobs/{digest}", unsupported)
+	r.Get("/v1/models", s.openAIModels)
+	r.Get("/v1/models/*", s.openAIModel)
+	r.Post("/v1/chat/completions", s.openAIChatCompletions)
+	r.Post("/v1/completions", s.openAICompletions)
+	r.Post("/v1/embeddings", s.openAIEmbeddings)
 	r.HandleFunc("/debug/pprof/", pprof.Index)
 	r.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
 	r.HandleFunc("/debug/pprof/profile", pprof.Profile)
@@ -352,27 +357,41 @@ func (s *Server) infer(w http.ResponseWriter, r *http.Request, req map[string]an
 }
 
 func (s *Server) prepareInference(w http.ResponseWriter, ctx context.Context, req map[string]any) (*config.Model, *lifecycle.Lease, bool) {
-	model, ok := s.resolve(w, stringField(req, "model"))
-	if !ok {
+	model, lease, status, err := s.acquireInference(ctx, req)
+	if err != nil {
+		writeError(w, status, err)
 		return nil, nil, false
+	}
+	return model, lease, true
+}
+
+func (s *Server) acquireInference(
+	ctx context.Context,
+	req map[string]any,
+) (*config.Model, *lifecycle.Lease, int, error) {
+	name := stringField(req, "model")
+	model, ok := s.manifest.Resolve(name)
+	if !ok {
+		return nil, nil, http.StatusNotFound, fmt.Errorf("model %q is not in models.yaml", name)
 	}
 	if !compat.LocalPathLooksPresent(model.ModelPath) {
 		if err := s.hf.CheckOpenVINO(ctx, model.HFRepo, model.HFRevision); err != nil {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("pre-download OpenVINO check failed for %s: %w", model.HFRepo, err))
-			return nil, nil, false
+			return nil, nil, http.StatusBadRequest, fmt.Errorf(
+				"pre-download OpenVINO check failed for %s: %w",
+				model.HFRepo,
+				err,
+			)
 		}
 	}
 	keepAlive, err := parseKeepAlive(req["keep_alive"])
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return nil, nil, false
+		return nil, nil, http.StatusBadRequest, err
 	}
 	lease, err := s.manager.EnsureLoaded(ctx, model, keepAlive)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
-		return nil, nil, false
+		return nil, nil, http.StatusBadGateway, err
 	}
-	return model, lease, true
+	return model, lease, http.StatusOK, nil
 }
 
 func (s *Server) streamInference(w http.ResponseWriter, r *http.Request, req map[string]any, path, modelName, mode string) {
