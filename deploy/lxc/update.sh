@@ -6,11 +6,13 @@ OPENARC_REPOSITORY="${OPENARC_REPOSITORY:-https://github.com/SearchSavior/OpenAr
 OPENARC_DIR="${OPENARC_DIR:-/opt/openarc}"
 RELEASE_ROOT="${RELEASE_ROOT:-/opt/openarc-releases}"
 STATE_DIR="${STATE_DIR:-/var/lib/openarc}"
+MODEL_DIR="${MODEL_DIR:-${STATE_DIR}/models}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/openarc}"
 ENV_FILE="${ENV_FILE:-${CONFIG_DIR}/openarc.env}"
 SERVICE_USER="${SERVICE_USER:-openarc}"
 KEEP_RELEASES="${KEEP_RELEASES:-2}"
 RUNTIME_REVISION=1
+SERVICE_GROUP="${SERVICE_USER}"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
@@ -23,6 +25,8 @@ PREVIOUS_KIND=""
 PREVIOUS_TARGET=""
 LEGACY_RELEASE=""
 SWITCHED=0
+GPU_DEVICES=()
+GPU_GROUPS=()
 
 log() {
   printf '[openarc-lxc-update] %s\n' "$*"
@@ -49,8 +53,6 @@ check_prerequisites() {
   [[ -d /run/systemd/system ]] || fail "systemd is required"
   [[ -f "${ENV_FILE}" ]] || fail "missing ${ENV_FILE}; run deploy/lxc/install.sh first"
   [[ -e "${OPENARC_DIR}" ]] || fail "missing ${OPENARC_DIR}; run deploy/lxc/install.sh first"
-  id "${SERVICE_USER}" >/dev/null 2>&1 || fail "service user ${SERVICE_USER} does not exist"
-
   local required
   for required in curl flock git go python3 runuser sha256sum systemctl uv; do
     command -v "${required}" >/dev/null 2>&1 || fail "required command not found: ${required}"
@@ -63,6 +65,85 @@ check_prerequisites() {
   [[ -f "${REPO_ROOT}/patches/openarc-tokenizer-fallback.py" ]] || fail "run this script from a complete wrapper checkout"
   [[ -f /etc/systemd/system/openarc.service ]] || fail "openarc.service is not installed"
   [[ -f /etc/systemd/system/ollama-openarc.service ]] || fail "ollama-openarc.service is not installed"
+}
+
+discover_gpu_access() {
+  local render_devices=(/dev/dri/renderD*)
+  [[ -e "${render_devices[0]}" ]] || fail \
+    "no /dev/dri/renderD* device is visible; pass the Arc render node into the LXC from the Proxmox host first"
+  RENDER_DEVICE="${RENDER_DEVICE:-${render_devices[0]}}"
+  [[ -c "${RENDER_DEVICE}" ]] || fail "${RENDER_DEVICE} is not a character device"
+
+  local devices=(/dev/dri/renderD* /dev/dri/card*)
+  local device gid group
+  local -A seen_devices=()
+  local -A seen_groups=()
+  for device in "${devices[@]}" "${RENDER_DEVICE}"; do
+    [[ -c "${device}" && -z "${seen_devices[${device}]:-}" ]] || continue
+    seen_devices["${device}"]=1
+    GPU_DEVICES+=("${device}")
+    gid="$(stat -c '%g' "${device}")"
+    group="$(getent group "${gid}" | cut -d: -f1 || true)"
+    if [[ -z "${group}" ]]; then
+      group="openarc-gpu-${gid}"
+      if getent group "${group}" >/dev/null; then
+        [[ "$(getent group "${group}" | cut -d: -f3)" == "${gid}" ]] || \
+          fail "group ${group} already exists with the wrong gid"
+      else
+        groupadd --gid "${gid}" "${group}"
+      fi
+    fi
+    if [[ -z "${seen_groups[${group}]:-}" ]]; then
+      seen_groups["${group}"]=1
+      GPU_GROUPS+=("${group}")
+    fi
+    log "using GPU device ${device} (group ${group}, gid ${gid})"
+  done
+
+  for group in render video; do
+    if getent group "${group}" >/dev/null && [[ -z "${seen_groups[${group}]:-}" ]]; then
+      seen_groups["${group}"]=1
+      GPU_GROUPS+=("${group}")
+    fi
+  done
+}
+
+ensure_service_user() {
+  if ! getent group "${SERVICE_GROUP}" >/dev/null; then
+    groupadd --system "${SERVICE_GROUP}"
+  fi
+  if ! id "${SERVICE_USER}" >/dev/null 2>&1; then
+    useradd \
+      --system \
+      --gid "${SERVICE_GROUP}" \
+      --home-dir "${STATE_DIR}" \
+      --create-home \
+      --shell /usr/sbin/nologin \
+      "${SERVICE_USER}"
+  else
+    usermod --gid "${SERVICE_GROUP}" --home "${STATE_DIR}" --shell /usr/sbin/nologin "${SERVICE_USER}"
+  fi
+
+  local supplemental_groups
+  supplemental_groups="$(IFS=,; printf '%s' "${GPU_GROUPS[*]}")"
+  [[ -z "${supplemental_groups}" ]] || usermod --append --groups "${supplemental_groups}" "${SERVICE_USER}"
+
+  install -d -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" -m 0750 \
+    "${STATE_DIR}" "${MODEL_DIR}" "${STATE_DIR}/cache" "${STATE_DIR}/huggingface"
+  chown "${SERVICE_USER}:${SERVICE_GROUP}" \
+    "${STATE_DIR}" "${MODEL_DIR}" "${STATE_DIR}/cache" "${STATE_DIR}/huggingface"
+
+  local device
+  for device in "${GPU_DEVICES[@]}"; do
+    if ! runuser -u "${SERVICE_USER}" -- test -r "${device}" ||
+       ! runuser -u "${SERVICE_USER}" -- test -w "${device}"; then
+      fail "${SERVICE_USER} cannot read and write ${device}; correct the LXC device gid/mode on the Proxmox host"
+    fi
+  done
+
+  local current_openarc
+  current_openarc="$(readlink -f "${OPENARC_DIR}")"
+  [[ ! -d "${current_openarc}" ]] || chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${current_openarc}"
 }
 
 apply_patches() {
@@ -105,6 +186,7 @@ prepare_openarc_release() {
   if [[ -f "${NEW_RELEASE}/.openarc-wrapper-release" ]] &&
      grep -qx "${commit} ${runtime_digest}" "${NEW_RELEASE}/.openarc-wrapper-release"; then
     log "reusing prepared OpenArc release ${release_id}"
+    chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${NEW_RELEASE}"
     rm -rf "${STAGING_DIR}"
     STAGING_DIR=""
     return
@@ -114,24 +196,33 @@ prepare_openarc_release() {
   mv "${STAGING_DIR}" "${NEW_RELEASE}"
   STAGING_DIR=""
   NEW_RELEASE_CREATED=1
+  chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${NEW_RELEASE}"
   chmod 0755 "${NEW_RELEASE}"
 
   log "applying wrapper compatibility patches"
   apply_patches "${NEW_RELEASE}"
+  chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${NEW_RELEASE}"
 
   log "installing OpenArc Python dependencies"
   (
     cd "${NEW_RELEASE}"
-    uv sync
-    uv pip install "optimum-intel[openvino] @ git+https://github.com/huggingface/optimum-intel"
-    uv pip install --pre -U openvino-genai openvino-tokenizers \
+    runuser -u "${SERVICE_USER}" -- env HOME="${STATE_DIR}" UV_CACHE_DIR="${STATE_DIR}/cache" \
+      uv sync
+    runuser -u "${SERVICE_USER}" -- env HOME="${STATE_DIR}" UV_CACHE_DIR="${STATE_DIR}/cache" \
+      uv pip install "optimum-intel[openvino] @ git+https://github.com/huggingface/optimum-intel"
+    runuser -u "${SERVICE_USER}" -- env HOME="${STATE_DIR}" UV_CACHE_DIR="${STATE_DIR}/cache" \
+      uv pip install --pre -U openvino-genai openvino-tokenizers \
       --extra-index-url https://storage.openvinotoolkit.org/simple/wheels/nightly
-    "${NEW_RELEASE}/.venv/bin/python" -m compileall -q \
+    runuser -u "${SERVICE_USER}" -- env HOME="${STATE_DIR}" \
+      "${NEW_RELEASE}/.venv/bin/python" -m compileall -q \
       "${NEW_RELEASE}/src" "${NEW_RELEASE}/.venv/lib/python3.12/site-packages"
   )
 
   ln -sfn "${STATE_DIR}/openarc_config.json" "${NEW_RELEASE}/openarc_config.json"
-  printf '%s %s\n' "${commit}" "${runtime_digest}" >"${NEW_RELEASE}/.openarc-wrapper-release"
+  chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "${NEW_RELEASE}/openarc_config.json"
+  runuser -u "${SERVICE_USER}" -- \
+    bash -c 'printf "%s %s\n" "$1" "$2" >"$3"' \
+    _ "${commit}" "${runtime_digest}" "${NEW_RELEASE}/.openarc-wrapper-release"
   NEW_RELEASE_CREATED=0
   log "prepared OpenArc release ${release_id}"
 }
@@ -284,6 +375,8 @@ main() {
   exec 9>/run/lock/openarc-lxc-update.lock
   flock -n 9 || fail "another OpenArc install or update is running"
 
+  discover_gpu_access
+  ensure_service_user
   prepare_openarc_release
   verify_staged_gpu
   build_facade

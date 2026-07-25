@@ -189,7 +189,9 @@ The updater fetches the requested OpenArc revision, applies this repository's
 compatibility patches, creates a new Python environment, rebuilds the Go
 facade, and switches the services only after the new release is prepared. It
 preserves `/etc/openarc/openarc.env`, `/etc/openarc/models.yaml`, and all
-downloaded models.
+downloaded models. Both installation and update ensure the `openarc` service
+account owns the OpenArc runtime, model state, and caches, and belongs to the
+groups required by every visible DRM render/card device.
 
 The first update migrates an installer-created `/opt/openarc` directory into
 versioned storage under `/opt/openarc-releases`. If OpenArc or the facade does
