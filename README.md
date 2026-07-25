@@ -175,9 +175,43 @@ Set `REPLACE_MANIFEST=1` to deliberately replace an existing installed
 manifest. Existing `/etc/openarc/openarc.env` configuration is otherwise
 preserved on reruns.
 
+### Updating a native LXC installation
+
+Pull the wrapper repository and run the dedicated updater:
+
+```sh
+cd OpenArc-Ollama-Wrapper
+git pull --ff-only
+sudo ./deploy/lxc/update.sh
+```
+
+The updater fetches the requested OpenArc revision, applies this repository's
+compatibility patches, creates a new Python environment, rebuilds the Go
+facade, and switches the services only after the new release is prepared. It
+preserves `/etc/openarc/openarc.env`, `/etc/openarc/models.yaml`, and all
+downloaded models.
+
+The first update migrates an installer-created `/opt/openarc` directory into
+versioned storage under `/opt/openarc-releases`. If OpenArc or the facade does
+not pass its local health check after activation, the updater restores the
+previous OpenArc release and facade binary. By default it keeps the active
+release and one previous release.
+
+To update to a branch, tag, or commit other than `main`, or retain more
+rollback versions:
+
+```sh
+sudo env OPENARC_REF=v2.0.5 KEEP_RELEASES=3 ./deploy/lxc/update.sh
+```
+
+The updater does not update its own wrapper checkout. Run `git pull --ff-only`
+first so the facade and OpenArc patches are built from the desired wrapper
+revision.
+
 The native installation uses:
 
-- `/opt/openarc` for the patched OpenArc checkout and Python environment.
+- `/opt/openarc` for the active patched OpenArc checkout and Python environment.
+- `/opt/openarc-releases` for versioned OpenArc releases and rollback.
 - `/usr/local/bin/ollama-openarc` for the compiled Go facade.
 - `/var/lib/openarc/models` for downloaded models.
 - `/etc/openarc/models.yaml` for the private model manifest.

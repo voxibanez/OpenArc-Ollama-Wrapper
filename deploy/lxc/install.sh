@@ -340,6 +340,9 @@ verify_gpu() {
 
 main() {
   require_root
+  exec 9>/run/lock/openarc-lxc-update.lock
+  flock -n 9 || fail "another OpenArc install or update is running"
+
   check_os
   check_render_device
   install_system_packages
