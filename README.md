@@ -191,7 +191,9 @@ facade, and switches the services only after the new release is prepared. It
 preserves `/etc/openarc/openarc.env`, `/etc/openarc/models.yaml`, and all
 downloaded models. Both installation and update ensure the `openarc` service
 account owns the OpenArc runtime, model state, and caches, and belongs to the
-groups required by every visible DRM render/card device.
+groups required by every visible DRM render/card device. Preserved environment
+and manifest files are normalized to `root:openarc` mode `0640` and checked for
+service-account readability before activation.
 
 The first update migrates an installer-created `/opt/openarc` directory into
 versioned storage under `/opt/openarc-releases`. If OpenArc or the facade does

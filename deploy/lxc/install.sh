@@ -175,6 +175,10 @@ create_service_user() {
     "${STATE_DIR}" "${MODEL_DIR}" "${STATE_DIR}/cache" "${STATE_DIR}/huggingface"
   chown "${SERVICE_USER}:${SERVICE_GROUP}" \
     "${STATE_DIR}" "${MODEL_DIR}" "${STATE_DIR}/cache" "${STATE_DIR}/huggingface"
+  if [[ -e "${STATE_DIR}/openarc_config.json" ]]; then
+    chown "${SERVICE_USER}:${SERVICE_GROUP}" "${STATE_DIR}/openarc_config.json"
+    chmod u+rw "${STATE_DIR}/openarc_config.json"
+  fi
   install -d -o root -g "${SERVICE_GROUP}" -m 0750 "${CONFIG_DIR}"
 
   local device
@@ -289,6 +293,12 @@ EOF
     chmod 0640 "${ENV_FILE}"
   else
     log "preserving existing environment file at ${ENV_FILE}"
+  fi
+
+  chown root:"${SERVICE_GROUP}" "${MANIFEST_DEST}" "${ENV_FILE}"
+  chmod 0640 "${MANIFEST_DEST}" "${ENV_FILE}"
+  if ! runuser -u "${SERVICE_USER}" -- test -r "${MANIFEST_DEST}"; then
+    fail "${SERVICE_USER} cannot read model manifest ${MANIFEST_DEST}"
   fi
 }
 
